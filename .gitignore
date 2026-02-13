@@ -1,0 +1,69 @@
+# Secrets and credentials
+.ssh/
+*.pem
+*.key
+*.token
+*.secret
+.vast_api_key
+.vast_containerlabel
+
+# Env files
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Python environments and caches
+.venv/
+venv/
+voxtral-env/
+**/.venv/
+**/venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build/package caches
+.cache/
+.npm/
+.conda/
+.triton/
+.nv/
+
+# IDE/tool state
+.claude/
+.claude.json
+.claude.json.backup*
+.cursor/
+.cursor-server/
+.antigravity-server/
+.antigravity_cockpit/
+.codex/
+.gemini/
+.local/
+.config/
+.jupyter/
+
+# Misc runtime/log artifacts
+*.log
+*.pid
+*.out
+*.tmp
+hasbooted
+
+# Host-specific shell/profile files
+.bashrc
+.profile
+.wget-hsts
+
+# Large model/artifact dirs often not source-controlled
+nltk_data/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

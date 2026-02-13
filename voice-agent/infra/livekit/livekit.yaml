@@ -1,0 +1,21 @@
+port: 7880
+rtc:
+  port_range_start: 50000
+  port_range_end: 60000
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+
+keys:
+  devkey: devsecret
+
+logging:
+  level: info
+  json: false
+
+room:
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: audio/red
+  max_participants: 10
+  empty_timeout: 300

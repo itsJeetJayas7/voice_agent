@@ -1,0 +1,14 @@
+channels:
+  - nvidia
+  - conda-forge
+mirrored_channels:
+  conda-forge:
+    - https://conda.anaconda.org/conda-forge
+    - https://prefix.dev/conda-forge
+
+auto_activate: false
+always_copy: true
+prefix_data_interoperability: true
+envs_dirs:
+  - /venv
+env_prompt: '({name}) '
