@@ -478,6 +478,16 @@ body {
     letter-spacing: 0.02em;
 }
 
+.footer-link {
+    color: var(--accent-primary);
+    text-decoration: none;
+    transition: color 150ms ease;
+}
+
+.footer-link:hover {
+    color: var(--accent-hover);
+}
+
 /* ── Scrollbar ──────────────────────────────────────── */
 
 .transcript-area::-webkit-scrollbar {

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from typing import AsyncGenerator
 from urllib.parse import quote_plus
 
+import numpy as np
 import websockets
 from websockets.protocol import State
 
@@ -56,6 +58,13 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
         self._session_ready = False
         self._partial_text = ""
         self._resampler = create_stream_resampler()
+        self._append_count = 0
+        self._commit_count = 0
+        self._voiced_append_since_commit = 0
+        self._last_commit_ts = 0.0
+        self._fallback_commit_interval_s = 2.0
+        self._fallback_min_appends = 8
+        self._voiced_peak_threshold = 80
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
@@ -89,12 +98,41 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
                 "audio": payload,
             }
         )
+        self._append_count += 1
+        samples = np.frombuffer(pcm16, dtype=np.int16)
+        peak = int(np.max(np.abs(samples))) if samples.size else 0
+        if peak >= self._voiced_peak_threshold:
+            self._voiced_append_since_commit += 1
+        if self._append_count == 1 or self._append_count % 100 == 0:
+            logger.info(
+                "STT append sent (count=%d, in_bytes=%d, out_bytes=%d, in_rate=%d, peak=%d)",
+                self._append_count,
+                len(audio),
+                len(pcm16),
+                self.sample_rate,
+                peak,
+            )
+
+        # Fallback: if VAD stop frames are missed, force periodic final commits
+        # so transcription can complete and the pipeline can progress.
+        now = time.monotonic()
+        if (
+            self._voiced_append_since_commit >= self._fallback_min_appends
+            and now - self._last_commit_ts >= self._fallback_commit_interval_s
+        ):
+            logger.info(
+                "STT fallback commit triggered (voiced_append_since_commit=%d, elapsed=%.2fs)",
+                self._voiced_append_since_commit,
+                now - self._last_commit_ts,
+            )
+            await self._send_json({"type": "input_audio_buffer.commit", "final": True})
         yield None
 
     async def _handle_vad_user_stopped_speaking(self, frame: VADUserStoppedSpeakingFrame):
         await super()._handle_vad_user_stopped_speaking(frame)
         # Final commit closes the current transcription turn and triggers
         # transcription.done from vLLM.
+        logger.info("VAD stop received by STT service; committing audio buffer (final=true)")
         await self._send_json({"type": "input_audio_buffer.commit", "final": True})
 
     async def _connect(self):
@@ -119,6 +157,10 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
 
         self._session_ready = False
         self._partial_text = ""
+        self._append_count = 0
+        self._commit_count = 0
+        self._voiced_append_since_commit = 0
+        self._last_commit_ts = time.monotonic()
         self._websocket = await websockets.connect(self._ws_url)
         await self._call_event_handler("on_connected")
         logger.info("Connected Voxtral realtime STT at %s", self._ws_url)
@@ -135,6 +177,16 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
     async def _send_json(self, payload: dict) -> None:
         try:
             if not self._disconnecting and self._websocket:
+                msg_type = payload.get("type", "unknown")
+                if msg_type == "input_audio_buffer.commit":
+                    self._commit_count += 1
+                    self._voiced_append_since_commit = 0
+                    self._last_commit_ts = time.monotonic()
+                    logger.info(
+                        "STT commit sent (count=%d, final=%s)",
+                        self._commit_count,
+                        payload.get("final"),
+                    )
                 await self._websocket.send(json.dumps(payload))
         except Exception as exc:
             if self._disconnecting or not self._websocket:
@@ -156,6 +208,7 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
             evt_type = evt.get("type", "")
 
             if evt_type == "session.created":
+                logger.info("STT websocket session.created received")
                 self._session_ready = True
                 # vLLM's realtime endpoint expects this minimal update shape.
                 await self._send_json({"type": "session.update", "model": self.model_name})
@@ -163,7 +216,7 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
                 await self._send_json({"type": "input_audio_buffer.commit"})
 
             elif evt_type == "session.updated":
-                logger.debug("STT session updated")
+                logger.info("STT websocket session.updated received")
 
             elif evt_type == "transcription.delta":
                 delta = evt.get("delta", "")
@@ -179,6 +232,11 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
 
             elif evt_type == "transcription.done":
                 text = (evt.get("text") or self._partial_text).strip()
+                logger.info(
+                    "STT transcription.done received (text_chars=%d, partial_chars=%d)",
+                    len(evt.get("text") or ""),
+                    len(self._partial_text),
+                )
                 if text:
                     await self.push_frame(
                         TranscriptionFrame(
