@@ -15,11 +15,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_text_processor import LLMTextProcessor
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.openai.tts import OpenAITTSService
@@ -29,6 +31,7 @@ from voice_agent.config import Settings
 from voice_agent.logging import get_logger
 from voice_agent.pipeline.interruption_controller import InterruptionController
 from voice_agent.pipeline.transcript_broadcaster import TranscriptBroadcaster
+from voice_agent.pipeline.tts_chunker import AdaptiveTextAggregator, ChunkerConfig
 from voice_agent.pipeline.voxtral_realtime_stt_service import VoxtralRealtimeSTTService
 
 if TYPE_CHECKING:
@@ -73,12 +76,23 @@ def build_pipeline(
 
     # ── VAD + STT (Voxtral Realtime WS API) ───────────────
     # Emit VAD start/stop frames before STT so we can commit utterances cleanly.
-    vad = VADProcessor(vad_analyzer=SileroVADAnalyzer())
+    vad_params = VADParams(
+        confidence=settings.vad_confidence,
+        start_secs=settings.vad_start_secs,
+        stop_secs=settings.vad_stop_secs,
+        min_volume=settings.vad_min_volume,
+    )
+    vad = VADProcessor(vad_analyzer=SileroVADAnalyzer(params=vad_params))
 
     stt = VoxtralRealtimeSTTService(
         host=settings.voxtral_host,
         port=settings.voxtral_port,
         model="mistralai/Voxtral-Mini-4B-Realtime-2602",
+        fallback_commit_enabled=settings.stt_fallback_commit_enabled,
+        fallback_commit_interval_s=settings.stt_fallback_commit_interval_s,
+        fallback_min_voiced_appends=settings.stt_fallback_min_voiced_appends,
+        voiced_peak_threshold=settings.stt_voiced_peak_threshold,
+        vad_stop_debounce_ms=settings.stt_vad_stop_debounce_ms,
     )
 
     # ── LLM (Cerebras via OpenAI-compatible API) ─────────
@@ -95,6 +109,9 @@ def build_pipeline(
         model="chatterbox-turbo",
         voice="alloy",
         sample_rate=settings.chatterbox_sample_rate,
+    )
+    tts_text_processor = LLMTextProcessor(
+        text_aggregator=AdaptiveTextAggregator(ChunkerConfig.from_settings(settings))
     )
 
     # ── Context management ───────────────────────────────
@@ -127,6 +144,7 @@ def build_pipeline(
             user_aggregator,             # Collect user context (with VAD)
             llm,                         # Cerebras LLM (streaming)
             agent_broadcaster,           # Broadcast agent text
+            tts_text_processor,          # Low-latency LLM text chunking
             tts,                         # Chatterbox: text → audio
             transport.output(),          # Send agent audio
             assistant_aggregator,        # Collect assistant context
@@ -135,6 +153,8 @@ def build_pipeline(
 
     task = PipelineTask(
         pipeline,
+        cancel_on_idle_timeout=settings.agent_cancel_on_idle_timeout,
+        idle_timeout_secs=settings.agent_idle_timeout_secs,
         params=PipelineParams(
             enable_metrics=settings.metrics_enabled,
             enable_usage_metrics=settings.metrics_enabled,

@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     agent_room: str = "voice-room"
     agent_identity: str = "voice-agent"
     max_concurrent_sessions: int = 10
+    # None disables Pipecat idle cancellation so the agent stays always-on.
+    agent_idle_timeout_secs: float | None = None
+    agent_cancel_on_idle_timeout: bool = False
 
     # ── VAD / Endpointing ───────────────────────────────
     vad_confidence: float = 0.6
@@ -59,6 +62,13 @@ class Settings(BaseSettings):
     endpoint_min_silence_ms: int = 300
     endpoint_max_silence_ms: int = 1500
     max_utterance_secs: int = 30
+
+    # ── STT Fallback / Commit Behaviour ──────────────────
+    stt_fallback_commit_enabled: bool = False
+    stt_fallback_commit_interval_s: float = 5.0
+    stt_fallback_min_voiced_appends: int = 20
+    stt_voiced_peak_threshold: int = 80
+    stt_vad_stop_debounce_ms: int = 150
 
     # ── TTS Chunker ─────────────────────────────────────
     chunk_min_chars: int = 24
@@ -106,6 +116,13 @@ class Settings(BaseSettings):
                 "CEREBRAS_API_KEY is required. "
                 "Set it in .env or as an environment variable."
             )
+        return v
+
+    @field_validator("agent_idle_timeout_secs", mode="before")
+    @classmethod
+    def _parse_agent_idle_timeout_secs(cls, v: object) -> object:
+        if isinstance(v, str) and v.strip().lower() in {"", "none", "null", "off"}:
+            return None
         return v
 
 

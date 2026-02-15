@@ -25,7 +25,7 @@ Ultra-low-latency, interruptible voice agent built with **LiveKit** + **Pipecat*
 │                                                            │
 │  LiveKitTransport.input()                                  │
 │      → VAD + Endpointing                                   │
-│      → Voxtral STT Adapter (incremental, partial/final)    │
+│      → Voxtral Realtime STT (WS /v1/realtime, partial/final)│
 │      → LLM Context Aggregation                             │
 │      → Cerebras LLM Adapter (stream tokens)                │
 │      → Adaptive Speakable Chunker                          │
@@ -188,6 +188,24 @@ All configuration is via environment variables (`.env` file). See `.env.example`
 | `ENDPOINT_MIN_SILENCE_MS` | 300 | Min silence with STT final |
 | `ENDPOINT_MAX_SILENCE_MS` | 1500 | Max silence without STT final |
 | `MAX_CONCURRENT_SESSIONS` | 10 | Session capacity cap |
+| `AGENT_IDLE_TIMEOUT_SECS` | `none` | Idle timeout before pipeline is considered idle (`none` keeps agent always-on) |
+| `AGENT_CANCEL_ON_IDLE_TIMEOUT` | `false` | Whether to cancel pipeline when idle timeout is hit |
+
+### STT Realtime / Fallback Tuning
+
+The active STT path uses a **Voxtral realtime websocket** connection (`/v1/realtime`), not the HTTP adapter.
+Audio is streamed via `input_audio_buffer.append`, and turn boundaries are signaled by `input_audio_buffer.commit` with `final=true`.
+
+By default, final commits are driven **only by VAD stop events** (local Silero VAD).
+A time-based fallback commit mechanism exists but is **disabled by default** to prevent premature turn finalization.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STT_FALLBACK_COMMIT_ENABLED` | `false` | Enable time-based fallback commits (only if VAD stops are unreliable) |
+| `STT_FALLBACK_COMMIT_INTERVAL_S` | `5.0` | Min seconds between fallback commits |
+| `STT_FALLBACK_MIN_VOICED_APPENDS` | `20` | Min voiced audio chunks before fallback can fire |
+| `STT_VOICED_PEAK_THRESHOLD` | `80` | PCM16 peak amplitude to count a chunk as voiced |
+| `STT_VAD_STOP_DEBOUNCE_MS` | `150` | Debounce window to suppress duplicate VAD-stop commits |
 
 ## License
 

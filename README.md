@@ -60,6 +60,26 @@ Open:
 
 Use room `voice-room` (default) unless you also change `AGENT_ROOM` in `voice-agent/.env`.
 
+## Always-On Mode (Recommended)
+
+Enable supervisor-managed autostart + autorestart for the full stack:
+
+```bash
+./scripts/enable_always_on.sh
+```
+
+Disable it:
+
+```bash
+./scripts/disable_always_on.sh
+```
+
+Check status:
+
+```bash
+supervisorctl status | rg '^voice_'
+```
+
 ## Stop Everything
 
 ```bash

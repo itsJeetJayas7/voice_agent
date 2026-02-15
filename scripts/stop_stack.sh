@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if command -v supervisorctl >/dev/null 2>&1 && supervisorctl status voice_stack:voice_agent >/dev/null 2>&1; then
+  supervisorctl stop voice_stack:* >/dev/null || true
+  echo "[stop] Voice stack (supervisor)"
+fi
+
 stop_pattern() {
   local name="$1"
   local pattern="$2"

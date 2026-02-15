@@ -32,6 +32,15 @@
 - Check network latency to Cerebras API
 - Verify TTS service is not overloaded
 
+### User speech is cut short or not transcribed
+- The active STT path is **Voxtral realtime websocket** (`/v1/realtime`), not the HTTP adapter.
+- By default, turn finalization is driven only by local VAD stop events.
+- If `STT_FALLBACK_COMMIT_ENABLED=true`, time-based fallback commits may force premature `final=true`, causing empty or truncated transcriptions.
+- **Fix**: ensure `STT_FALLBACK_COMMIT_ENABLED=false` (the default).
+- If transcriptions are still cut short, increase `VAD_STOP_SECS` (e.g., 1.0–1.5) to give users more time to pause mid-sentence.
+- Increase `STT_VAD_STOP_DEBOUNCE_MS` if duplicate stop events cause repeated empty commits.
+- Check `agent.log` for the ratio of `reason=fallback` vs `reason=vad_stop` commits, and the ratio of `text_chars=0` in `transcription.done` events.
+
 ### Barge-in not working
 - Verify `enable_interruptions` is true in transport config
 - Check VAD sensitivity: lower `VAD_CONFIDENCE` (e.g., 0.5)

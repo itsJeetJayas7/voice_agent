@@ -7,6 +7,7 @@ transcription.delta/done events).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -27,7 +28,6 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     VADUserStoppedSpeakingFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.utils.time import time_now_iso8601
 
@@ -47,6 +47,11 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
         host: str,
         port: int,
         model: str,
+        fallback_commit_enabled: bool = False,
+        fallback_commit_interval_s: float = 5.0,
+        fallback_min_voiced_appends: int = 20,
+        voiced_peak_threshold: int = 80,
+        vad_stop_debounce_ms: int = 150,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -62,16 +67,39 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
         self._commit_count = 0
         self._voiced_append_since_commit = 0
         self._last_commit_ts = 0.0
-        self._fallback_commit_interval_s = 2.0
-        self._fallback_min_appends = 8
-        self._voiced_peak_threshold = 80
+        # Fallback commit config (disabled by default to avoid premature cuts)
+        self._fallback_commit_enabled = fallback_commit_enabled
+        self._fallback_commit_interval_s = fallback_commit_interval_s
+        self._fallback_min_appends = fallback_min_voiced_appends
+        self._voiced_peak_threshold = voiced_peak_threshold
+        # VAD stop debounce to prevent duplicate final commits
+        self._vad_stop_debounce_ms = vad_stop_debounce_ms
+        self._last_vad_stop_commit_ts = 0.0
+        self._connect_retry_interval_s = 2.0
+        self._connect_startup_timeout_s = 180.0
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
-        await self._connect()
+        deadline = time.monotonic() + self._connect_startup_timeout_s
+        while True:
+            try:
+                await self._connect()
+                return
+            except Exception as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                sleep_s = min(self._connect_retry_interval_s, remaining)
+                logger.warning(
+                    "STT connect failed, retrying in %.1fs (remaining=%.1fs): %s",
+                    sleep_s,
+                    remaining,
+                    exc,
+                )
+                await asyncio.sleep(sleep_s)
 
     async def stop(self, frame: EndFrame):
-        await self._send_json({"type": "input_audio_buffer.commit", "final": True})
+        await self._commit_audio(reason="shutdown")
         await super().stop(frame)
         await self._disconnect()
 
@@ -115,25 +143,48 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
 
         # Fallback: if VAD stop frames are missed, force periodic final commits
         # so transcription can complete and the pipeline can progress.
-        now = time.monotonic()
-        if (
-            self._voiced_append_since_commit >= self._fallback_min_appends
-            and now - self._last_commit_ts >= self._fallback_commit_interval_s
-        ):
-            logger.info(
-                "STT fallback commit triggered (voiced_append_since_commit=%d, elapsed=%.2fs)",
-                self._voiced_append_since_commit,
-                now - self._last_commit_ts,
-            )
-            await self._send_json({"type": "input_audio_buffer.commit", "final": True})
+        # Disabled by default — only fires when explicitly enabled.
+        if self._fallback_commit_enabled:
+            now = time.monotonic()
+            if (
+                self._voiced_append_since_commit >= self._fallback_min_appends
+                and now - self._last_commit_ts >= self._fallback_commit_interval_s
+            ):
+                logger.info(
+                    "STT fallback commit triggered (voiced_append_since_commit=%d, elapsed=%.2fs)",
+                    self._voiced_append_since_commit,
+                    now - self._last_commit_ts,
+                )
+                await self._commit_audio(reason="fallback")
         yield None
 
     async def _handle_vad_user_stopped_speaking(self, frame: VADUserStoppedSpeakingFrame):
         await super()._handle_vad_user_stopped_speaking(frame)
+        # Debounce rapid duplicate VAD stop events
+        now = time.monotonic()
+        elapsed_ms = (now - self._last_vad_stop_commit_ts) * 1000
+        if elapsed_ms < self._vad_stop_debounce_ms:
+            logger.info(
+                "VAD stop debounced (elapsed_ms=%.1f, debounce_ms=%d)",
+                elapsed_ms,
+                self._vad_stop_debounce_ms,
+            )
+            return
         # Final commit closes the current transcription turn and triggers
         # transcription.done from vLLM.
         logger.info("VAD stop received by STT service; committing audio buffer (final=true)")
+        await self._commit_audio(reason="vad_stop")
+
+    async def _commit_audio(self, *, reason: str) -> None:
+        """Send input_audio_buffer.commit with final=true and log the reason."""
+        logger.info(
+            "STT commit (reason=%s, voiced_since_last=%d)",
+            reason,
+            self._voiced_append_since_commit,
+        )
         await self._send_json({"type": "input_audio_buffer.commit", "final": True})
+        if reason == "vad_stop":
+            self._last_vad_stop_commit_ts = time.monotonic()
 
     async def _connect(self):
         await super()._connect()
@@ -161,6 +212,7 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
         self._commit_count = 0
         self._voiced_append_since_commit = 0
         self._last_commit_ts = time.monotonic()
+        self._last_vad_stop_commit_ts = 0.0
         self._websocket = await websockets.connect(self._ws_url)
         await self._call_event_handler("on_connected")
         logger.info("Connected Voxtral realtime STT at %s", self._ws_url)
@@ -246,6 +298,8 @@ class VoxtralRealtimeSTTService(WebsocketSTTService):
                             finalized=True,
                         )
                     )
+                else:
+                    logger.debug("Suppressing empty transcription.done (no text to emit)")
                 self._partial_text = ""
                 # Rearm next turn after a finalized commit.
                 await self._send_json({"type": "input_audio_buffer.commit"})

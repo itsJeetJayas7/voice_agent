@@ -6,6 +6,13 @@ VOICE_DIR="${ROOT_DIR}/voice-agent"
 LOG_DIR="${ROOT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 
+if command -v supervisorctl >/dev/null 2>&1 && supervisorctl status voice_stack:voice_agent >/dev/null 2>&1; then
+  supervisorctl start voice_stack:* >/dev/null || true
+  echo "Supervisor-managed voice stack detected."
+  supervisorctl status voice_stack:* || true
+  exit 0
+fi
+
 require_file() {
   local path="$1"
   if [ ! -f "${path}" ]; then
@@ -39,6 +46,7 @@ start_if_missing() {
 
 require_file "${VOICE_DIR}/.venv/bin/activate"
 require_file "${ROOT_DIR}/start_vllm.sh"
+require_file "${ROOT_DIR}/scripts/run_voice_agent.sh"
 
 start_if_missing \
   "LiveKit" \
@@ -67,7 +75,7 @@ start_if_missing \
 start_if_missing \
   "Voice agent" \
   "python -u -m voice_agent.main" \
-  "cd '${VOICE_DIR}' && source .venv/bin/activate && python -u -m voice_agent.main" \
+  "cd '${ROOT_DIR}' && bash '${ROOT_DIR}/scripts/run_voice_agent.sh'" \
   "${LOG_DIR}/agent.log"
 
 start_if_missing \

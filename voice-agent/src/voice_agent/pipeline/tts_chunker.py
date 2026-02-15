@@ -14,6 +14,13 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from typing import AsyncIterator, Optional
+
+from pipecat.utils.text.base_text_aggregator import (
+    Aggregation,
+    AggregationType,
+    BaseTextAggregator,
+)
 
 from voice_agent.config import Settings
 from voice_agent.logging import get_logger
@@ -42,6 +49,96 @@ class ChunkerConfig:
             max_chars=settings.chunk_max_chars,
             max_wait_ms=settings.chunk_max_wait_ms,
         )
+
+
+class AdaptiveTextAggregator(BaseTextAggregator):
+    """Low-latency text aggregator for streaming LLM -> TTS.
+
+    Flush rules match ``TTSChunker``:
+    1. `max_chars` reached
+    2. punctuation boundary reached and `min_chars` met
+    3. `max_wait_ms` deadline reached
+    """
+
+    def __init__(self, config: ChunkerConfig | None = None) -> None:
+        self.config = config or ChunkerConfig()
+        self._buffer: str = ""
+        self._first_token_time: float = 0.0
+
+    @property
+    def text(self) -> Aggregation:
+        return Aggregation(text=self._buffer.strip(" "), type=AggregationType.SENTENCE)
+
+    async def aggregate(self, text: str) -> AsyncIterator[Aggregation]:
+        if not text:
+            return
+
+        self._buffer += text
+        if not self._first_token_time and self._buffer.strip():
+            self._first_token_time = time.monotonic()
+
+        while True:
+            chunk = self._next_chunk()
+            if not chunk:
+                break
+            yield Aggregation(text=chunk, type=AggregationType.SENTENCE)
+
+    async def flush(self) -> Optional[Aggregation]:
+        if self._buffer.strip():
+            result = self._buffer.strip()
+            await self.reset()
+            return Aggregation(text=result, type=AggregationType.SENTENCE)
+        return None
+
+    async def handle_interruption(self):
+        await self.reset()
+
+    async def reset(self):
+        self._buffer = ""
+        self._first_token_time = 0.0
+
+    def _next_chunk(self) -> str | None:
+        text = self._buffer
+        if not text:
+            return None
+
+        if len(text) >= self.config.max_chars:
+            split_at = self._find_break_index(text, self.config.max_chars)
+            return self._drain_prefix(split_at)
+
+        if len(text) >= self.config.min_chars:
+            punctuation_idx = self._find_punctuation_boundary(text)
+            if punctuation_idx is not None:
+                return self._drain_prefix(punctuation_idx + 1)
+
+        if (
+            self._first_token_time
+            and text.strip()
+            and (time.monotonic() - self._first_token_time) * 1000 >= self.config.max_wait_ms
+        ):
+            return self._drain_prefix(len(text))
+
+        return None
+
+    def _find_break_index(self, text: str, max_len: int) -> int:
+        limit = min(max_len, len(text))
+        for i in range(limit - 1, -1, -1):
+            if text[i] in PUNCTUATION_BOUNDARIES:
+                return i + 1
+        return limit
+
+    def _find_punctuation_boundary(self, text: str) -> int | None:
+        start = max(self.config.min_chars - 1, 0)
+        for i in range(len(text) - 1, start - 1, -1):
+            if text[i] in PUNCTUATION_BOUNDARIES:
+                return i
+        return None
+
+    def _drain_prefix(self, size: int) -> str | None:
+        chunk = self._buffer[:size].strip()
+        self._buffer = self._buffer[size:].lstrip()
+        self._first_token_time = time.monotonic() if self._buffer.strip() else 0.0
+        return chunk or None
 
 
 class TTSChunker:
